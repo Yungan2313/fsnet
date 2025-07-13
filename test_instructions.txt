@@ -1,0 +1,16 @@
+python -u main.py \
+  --method fsnet \
+  --data 2454 \
+  --data_path 2454.csv \
+  --features M \
+  --seq_len 180 \
+  --label_len 0 \
+  --pred_len 30 \
+  --root_path ./data/ \
+  --n_inner 1 \
+  --test_bsz 1 \
+  --train_epochs 6 \
+  --learning_rate 1e-3 \
+  --online_learning full \
+  --itr 1 \
+  --des 'exp'
