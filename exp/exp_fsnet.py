@@ -288,7 +288,9 @@ class Exp_TS2VecSupervised(Exp_Basic):
         return outputs, rearrange(batch_y, 'b t d -> b (t d)')
     
     def _ol_one_batch(self,dataset_object, batch_x, batch_y, batch_x_mark, batch_y_mark):
-        true = rearrange(batch_y, 'b t d -> b (t d)').float().to(self.device)
+        f_dim = -1 if self.args.features=='MS' else 0
+        true = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+        true = rearrange(true, 'b t d -> b (t d)').float()
         criterion = self._select_criterion()
         
         x = torch.cat([batch_x.float(), batch_x_mark.float()], dim=-1).to(self.device)
