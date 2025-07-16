@@ -1,41 +1,39 @@
-## M
+#!/bin/bash
 
+# 參數設定
 i=1
-ns=(1 )
-bszs=(1 )
-lens=(1 24 48)
-methods=('ogd' 'large' 'er' 'derpp' 'fsnet' 'nomem' 'naive')
-for n in ${ns[*]}; do
-for bsz in ${bszs[*]}; do
-for len in ${lens[*]}; do
-for m in ${methods[*]}; do
-CUDA_VISIBLE_DEVICES=0 python -u main.py --method $m --root_path ./data/ --n_inner $n --test_bsz $bsz --data ETTh2 --features M --seq_len 60 --label_len 0 --pred_len $len --des 'Exp' --itr $i --train_epochs 6 --learning_rate 1e-3 --online_learning 'full'
-CUDA_VISIBLE_DEVICES=0 python -u main.py --method $m --root_path ./data/ --n_inner $n --test_bsz $bsz --data ETTm1 --features M --seq_len 60 --label_len 0 --pred_len $len --des 'Exp' --itr $i --train_epochs 6 --learning_rate 1e-3 --online_learning 'full'
-CUDA_VISIBLE_DEVICES=0 python -u main.py  --method $m --root_path ./data/ --n_inner $n --test_bsz $bsz --data WTH --features M --seq_len 60 --label_len 0 --pred_len $len --des 'Exp' --itr $i --train_epochs 6 --learning_rate 1e-3 --online_learning 'full'
-CUDA_VISIBLE_DEVICES=0 python -u main.py --method $m --root_path ./data/ --n_inner $n --test_bsz $bsz --data ECL --features M --seq_len 60 --label_len 0 --pred_len $len --des 'Exp' --itr $i --train_epochs 6 --learning_rate 3e-3 --online_learning 'full'
-done
-done
-done
-done
-# M
-lens=(24 1)
-for n in ${ns[*]}; do
-for bsz in ${bszs[*]}; do
-for len in ${lens[*]}; do
-for m in ${methods[*]}; do
-echo $m $l
-CUDA_VISIBLE_DEVICES=0 python -u main.py --method $m --root_path ./data/ --n_inner $n --test_bsz $bsz --data Traffic --features M --seq_len 60 --label_len 0 --pred_len $len --des 'Exp' --itr $i --train_epochs 6 --learning_rate 3e-3 --online_learning 'full'
-done
-done
-done
-done
+n=1
+bsz=1
+pred_len=30
+method="fsnet"
 
+# 自訂資料集
+data_name="2454"
+data_file="2454.csv"
+root="./data/"
 
+#要修改input 維度記得修改 => enc_in
 
-
-
-
-
-
-
-
+python -u main.py \
+  --method $method \
+  --data $data_name \
+  --data_path $data_file \
+  --target close \
+  --enc_in 1 \
+  --dec_in 1 \
+  --c_out 1 \
+  --e_layers 6 \
+  --d_layers 3 \
+  --features S \
+  --seq_len 180 \
+  --label_len 15 \
+  --pred_len $pred_len \
+  --root_path $root \
+  --n_inner $n \
+  --test_bsz $bsz \
+  --train_epochs 60 \
+  --patience 20 \
+  --learning_rate 1e-4 \
+  --online_learning full \
+  --itr $i \
+  --des 'exp'
