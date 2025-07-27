@@ -123,6 +123,19 @@ parser.add_argument('--devices', type=str, default='0,1,2,3',help='device ids of
 
 parser.add_argument('--finetune', action='store_true', default=False)
 parser.add_argument('--finetune_model_seed', type=int)
+#new arguments for multi-dataset
+parser.add_argument('--tickers', type=str, default=None, help="multi-dataset：\
+                    1) comma split data，ex: '2330,2317,2603'\
+                    origin mode will be used if not set"
+)
+parser.add_argument('--pretrained', type=str, default=None, help=
+                    "pre-train encoder/checkpoint.pt datapath; origin mode will be used if not set"
+)
+# new loss calculation
+parser.add_argument('--loss_mode', type=str, default='direct', choices=['direct', 'diff'], help=
+                    "direct: MSE; diff: change to Increase then MSE"
+)
+
 
 args = parser.parse_args()
 
@@ -157,6 +170,10 @@ if args.data in data_parser.keys():
 args.s_layers = [int(s_l) for s_l in args.s_layers.replace(' ','').split(',')]
 args.detail_freq = args.freq
 args.freq = args.freq[-1:]
+
+#new arguments for multi-dataset
+if args.tickers is not None:
+    args.tickers = [s.strip() for s in args.tickers.split(',') if s.strip()]
 
 print('Args in experiment:')
 print(args)

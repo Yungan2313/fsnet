@@ -4,7 +4,7 @@ i=1
 ns=(1 )
 bszs=(1 )
 lens=(1 24 48)
-methods=('ogd' 'large' 'er' 'derpp' 'fsnet' 'nomem' 'naive')
+methods=('fsnet')
 for n in ${ns[*]}; do
 for bsz in ${bszs[*]}; do
 for len in ${lens[*]}; do
