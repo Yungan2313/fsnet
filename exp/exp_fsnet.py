@@ -26,6 +26,31 @@ from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 
+class StepByPredLenSampler(Sampler):
+    """Single dataset: each batch is one index; indices step by pred_len."""
+    def __init__(self, dataset_len, step):
+        self.indices = list(range(0, dataset_len, int(step)))
+    def __iter__(self):
+        for i in self.indices:
+            yield [i]                 # single-sample batch
+    def __len__(self):
+        return len(self.indices)
+    
+class StepByPredLenConcatSampler(Sampler):
+    """ConcatDataset: step within each sub-dataset by pred_len."""
+    def __init__(self, datasets, step):
+        self.batches = []
+        offset = 0
+        step = int(step)
+        for d in datasets:
+            n = len(d)
+            for i in range(0, n, step):
+                self.batches.append([offset + i])  # single-sample batch
+            offset += n
+    def __iter__(self):
+        return iter(self.batches)
+    def __len__(self):
+        return len(self.batches)
 
 class TS2VecEncoderWrapper(nn.Module):
     def __init__(self, encoder, mask):
@@ -40,6 +65,14 @@ class net(nn.Module):
     def __init__(self, args, device):
         super().__init__()
         self.device = device
+        
+        # for limiting output
+        self.pct_limit = args.pct_limit          # e.g. 0.10
+        self.limit_col = args.limit_col          # e.g. -1 (last column)
+        self.pred_len = args.pred_len
+        self.c_out    = args.c_out
+
+        
         encoder = TSEncoder(input_dims=args.enc_in + 7,
                              output_dims=320,  # standard ts2vec backbone value
                              hidden_dims=64, # standard ts2vec backbone value
@@ -50,10 +83,37 @@ class net(nn.Module):
         #self.regressor = nn.Sequential(nn.Linear(320, 320), nn.ReLU(), nn.Linear(320, self.dim)).to(self.device)
         self.regressor = nn.Linear(320, self.dim).to(self.device)
         
-    def forward(self, x):
-        rep = self.encoder(x)
-        y = self.regressor(rep)
-        return y
+    def forward(self, feat_x, prev_price_flat = None, col_mean=None, col_std=None):
+        """
+        limit output:
+        feat_x           : (B,  seq_len, D+7)  ← concat(x, x_mark)
+        prev_price_flat  : (B,  pred_len*C)    ← 最後真值攤平
+        """
+        rep = self.encoder(feat_x)
+        logits = self.regressor(rep)
+        # print("DBG:", self.pct_limit, prev_price_flat is None)  # ← 只跑一次就知道
+        if self.pct_limit <= 0 or prev_price_flat is None:
+            return logits
+        
+        assert col_mean is not None and col_std is not None, "need mean/std"
+
+        B, T, C = logits.size(0), self.pred_len, self.c_out
+        col     = self.limit_col % C
+
+        logits = logits.view(B, T, C)
+        prev   = prev_price_flat.view(B, T, C)
+
+        # 1) 反標準化目標欄位
+        prev_real  = prev[:, :, col] * col_std + col_mean           # (B,T)
+        logits_pct = torch.tanh(logits[:, :, col]) * self.pct_limit # (B,T) ∈ ±pct
+        bound_real = prev_real * (1 + logits_pct)                   # 真實價格 ±10 %
+
+        # 2) 再標準化回來，覆蓋到 price
+        price_norm = prev.clone()                                   # (B,T,C)
+        price_norm[:, :, col] = (bound_real - col_mean) / col_std
+
+        return price_norm.view(B, -1)
+        
     def store_grad(self):
         for name, layer in self.encoder.named_modules():    
             if 'PadConv' in type(layer).__name__:
@@ -69,6 +129,8 @@ class Exp_TS2VecSupervised(Exp_Basic):
         self.n_inner = args.n_inner
         self.opt_str = args.opt
         self.model = net(args, device = self.device)
+        self.C   = self.args.c_out                      # 每筆資料的特徵數
+        self.col = self.args.limit_col % self.C              # -1 → 最後一欄
         
         # load pretrained model if specified
         if getattr(self.args, 'pretrained', None):
@@ -140,7 +202,9 @@ class Exp_TS2VecSupervised(Exp_Basic):
                     inverse=args.inverse,
                     timeenc=timeenc,
                     freq=freq,
-                    cols=args.cols)
+                    cols=args.cols,
+                    date_from=self.args.date_from,
+                    date_to=self.args.date_to)
                 for code in self.args.tickers
             ]
             data_set = ConcatDataset(single_sets)
@@ -163,7 +227,9 @@ class Exp_TS2VecSupervised(Exp_Basic):
                 inverse=args.inverse,
                 timeenc=timeenc,
                 freq=freq,
-                cols=args.cols
+                cols=args.cols,
+                date_from=self.args.date_from,
+                date_to=self.args.date_to
             )
             print(flag, len(data_set))
             data_loader = DataLoader(
@@ -173,6 +239,23 @@ class Exp_TS2VecSupervised(Exp_Basic):
                 num_workers=args.num_workers,
                 drop_last=drop_last)
 
+        # === NEW: non-overlapping test windows when enabled ===
+        if flag == 'test' and getattr(self.args, 'non_overlap_test', False):
+            # 忽略原本的 shuffle/batch_size，改用 batch_sampler 逐窗取樣
+            if isinstance(data_set, ConcatDataset):
+                batch_sampler = StepByPredLenConcatSampler(
+                    data_set.datasets, step=self.args.pred_len
+                )
+            else:
+                batch_sampler = StepByPredLenSampler(
+                    len(data_set), step=self.args.pred_len
+                )
+            data_loader = DataLoader(
+                data_set,
+                batch_sampler=batch_sampler,
+                num_workers=self.args.num_workers
+            )
+        
         return data_set, data_loader
 
     def _select_optimizer(self):
@@ -180,8 +263,31 @@ class Exp_TS2VecSupervised(Exp_Basic):
         return self.opt
 
     def _select_criterion(self):
-        criterion = nn.MSELoss()
-        return criterion
+        """
+        · loss_mode == 'diff' → 先看 Δ%，大於門檻(10%) 的項目把 MSE 乘上 weight
+        · 其他 loss_mode       → 普通 MSE
+        """
+        th = self.args.diff_threshold          
+        w  = self.args.diff_weight
+
+        def weighted_mse(pred_price, true_price, prev_price):
+            """
+            pred_flat, true_flat, prev_flat 全是 [B, T*C]
+            prev_flat 只有在 diff 模式才會傳進來；否則是 None
+            """
+            if self.args.loss_mode == 'diff':
+                diff_pred = pred_price - prev_price
+                diff_true = true_price - prev_price
+                pct       = diff_true / (prev_price.abs() + 1e-8)
+
+                weight = torch.where(pct.abs() > th,
+                                     torch.tensor(w, device=pred_price.device),
+                                     torch.tensor(1.0, device=pred_price.device))
+                return torch.mean(weight * (diff_pred - diff_true) ** 2)
+            else:                              # direct
+                return torch.mean((pred_price - true_price) ** 2)
+
+        return weighted_mse
 
     def train(self, setting):
         train_data, train_loader = self._get_data(flag='train')
@@ -213,9 +319,9 @@ class Exp_TS2VecSupervised(Exp_Basic):
                 iter_count += 1
 
                 self.opt.zero_grad()
-                pred, true = self._process_one_batch(
+                pred, true, prev = self._process_one_batch(
                     train_data, batch_x, batch_y, batch_x_mark, batch_y_mark)
-                loss = criterion(pred, true)
+                loss = criterion(pred, true, prev)
                 train_loss.append(loss.item())
                 
                 if (i + 1) % 100 == 0:
@@ -258,9 +364,9 @@ class Exp_TS2VecSupervised(Exp_Basic):
         self.model.eval()
         total_loss = []
         for i, (batch_x,batch_y,batch_x_mark,batch_y_mark) in enumerate(vali_loader):
-            pred, true = self._process_one_batch(
+            pred, true, prev = self._process_one_batch(
                 vali_data, batch_x, batch_y, batch_x_mark, batch_y_mark, mode='vali')
-            loss = criterion(pred.detach().cpu(), true.detach().cpu())
+            loss = criterion(pred.detach().cpu(), true.detach().cpu(), prev.detach().cpu())
             total_loss.append(loss)
         total_loss = np.average(total_loss)
         self.model.train()
@@ -282,7 +388,7 @@ class Exp_TS2VecSupervised(Exp_Basic):
         start = time.time()
         maes,mses,rmses,mapes,mspes = [],[],[],[],[]
         for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(tqdm(test_loader)):
-            pred, true = self._process_one_batch(
+            pred, true, _ = self._process_one_batch(
                 test_data, batch_x, batch_y, batch_x_mark, batch_y_mark, mode='test')
             preds.append(pred.detach().cpu())
             trues.append(true.detach().cpu())
@@ -312,61 +418,97 @@ class Exp_TS2VecSupervised(Exp_Basic):
 
         x = torch.cat([batch_x.float(), batch_x_mark.float()], dim=-1).to(self.device)
         batch_y = batch_y.float()
+        # --------- 新增：先算 prev_flat 給裁剪用 ---------
+        f_dim   = -1 if self.args.features == 'MS' else 0
+        last_in = batch_x[:, -1:, f_dim:].to(self.device)               # (B,1,C)
+        prev_flat = last_in.expand(-1, self.args.pred_len, -1)     # (B,T,C)
+        prev_flat = rearrange(prev_flat, 'b t c -> b (t c)')        # (B,T*C)
+        # for limiting output
+        if isinstance(dataset_object, torch.utils.data.ConcatDataset):
+            scaler = dataset_object.datasets[0].scaler   # SameCompanyBatchSampler ⇒ 同公司
+        else:
+            scaler = dataset_object.scaler
+        mean_val = scaler.mean_[self.col]  if hasattr(scaler, 'mean_')  else scaler.mean[self.col]
+        std_val  = scaler.scale_[self.col] if hasattr(scaler, 'scale_') else scaler.std[self.col]
+
+        mean = torch.tensor(mean_val, device=self.device, dtype=torch.float32)
+        std  = torch.tensor(std_val,  device=self.device, dtype=torch.float32)
+        
+        
         if self.args.use_amp:
             with torch.cuda.amp.autocast():
-                outputs = self.model(x)
+                outputs = self.model(x,
+                                    prev_flat if self.args.pct_limit > 0 else None,
+                                    mean     if self.args.pct_limit > 0 else None,
+                                    std      if self.args.pct_limit > 0 else None)
         else:
-            outputs = self.model(x)
+            outputs = self.model(x,
+                                prev_flat if self.args.pct_limit > 0 else None,
+                                mean     if self.args.pct_limit > 0 else None,
+                                std      if self.args.pct_limit > 0 else None)
         f_dim = -1 if self.args.features=='MS' else 0
-        batch_y = batch_y[:,-self.args.pred_len:,f_dim:].to(self.device)
-        gt_full = rearrange(batch_y, 'b t d -> b (t d)')
+        # 真值價格  (B,T,C) → (B,T*C)
+        gt_seq  = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+        true    = rearrange(gt_seq, 'b t d -> b (t d)')
         
         # new loss calculation
-        if self.args.loss_mode == 'diff':          # <<< 新增判斷
-            last_in = batch_x[:,-1:,f_dim:].to(self.device)   # [B,1,C]
-            outputs, gt_full = diff_transform(
-                outputs, gt_full, last_in,
-                pred_len=self.args.pred_len,
-                out_dim=self.args.c_out
-            )
+        # 前一價格  (最後一個輸入點) 同樣攤平
+        last_in   = batch_x[:, -1:, f_dim:].to(self.device)      # (B,1,C)
+        prev_flat = rearrange(last_in.expand_as(gt_seq), 'b t d -> b (t d)')
         
-        return outputs, gt_full
+        return outputs, true, prev_flat
     
     def _ol_one_batch(self,dataset_object, batch_x, batch_y, batch_x_mark, batch_y_mark):
         f_dim = -1 if self.args.features == 'MS' else 0
         true = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
         true = rearrange(true, 'b t d -> b (t d)').float()
+        last_in = batch_x[:, -1:, f_dim:].to(self.device)              # (B,1,C)
+        prev_flat = rearrange(last_in.expand_as(batch_y[:, -self.args.pred_len:, f_dim:]), 'b t d -> b (t d)')
         criterion = self._select_criterion()
         
         x = torch.cat([batch_x.float(), batch_x_mark.float()], dim=-1).to(self.device)
         batch_y = batch_y.float()
+        
+        # for limiting output
+        if isinstance(dataset_object, torch.utils.data.ConcatDataset):
+            scaler = dataset_object.datasets[0].scaler   # SameCompanyBatchSampler ⇒ 同公司
+        else:
+            scaler = dataset_object.scaler
+        mean_val = scaler.mean_[self.col]  if hasattr(scaler, 'mean_')  else scaler.mean[self.col]
+        std_val  = scaler.scale_[self.col] if hasattr(scaler, 'scale_') else scaler.std[self.col]
+
+        mean = torch.tensor(mean_val, device=self.device, dtype=torch.float32)
+        std  = torch.tensor(std_val,  device=self.device, dtype=torch.float32)
+        
         for _ in range(self.n_inner):
             if self.args.use_amp:
                 with torch.cuda.amp.autocast():
-                    outputs = self.model(x)
+                    outputs = self.model(x,
+                                        prev_flat if self.args.pct_limit > 0 else None,
+                                        mean     if self.args.pct_limit > 0 else None,
+                                        std      if self.args.pct_limit > 0 else None)
             else:
-                outputs = self.model(x)
-
-            loss = criterion(outputs, true)
+                outputs = self.model(x,
+                                        prev_flat if self.args.pct_limit > 0 else None,
+                                        mean     if self.args.pct_limit > 0 else None,
+                                        std      if self.args.pct_limit > 0 else None)
+            loss = criterion(outputs, true, prev_flat)
             loss.backward()
             self.opt.step()       
             self.model.store_grad()
             self.opt.zero_grad()
 
         f_dim = -1 if self.args.features=='MS' else 0
-        batch_y = batch_y[:,-self.args.pred_len:,f_dim:].to(self.device)
-        gt_full = rearrange(batch_y, 'b t d -> b (t d)')
+        # 真值價格  (B,T,C) → (B,T*C)
+        gt_seq  = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+        true    = rearrange(gt_seq, 'b t d -> b (t d)')
         
         # new loss calculation
-        if self.args.loss_mode == 'diff':          # <<< 新增判斷
-            last_in = batch_x[:,-1:,f_dim:].to(self.device)   # [B,1,C]
-            outputs, gt_full = diff_transform(
-                outputs, gt_full, last_in,
-                pred_len=self.args.pred_len,
-                out_dim=self.args.c_out
-            )
+        # 前一價格  (最後一個輸入點) 同樣攤平
+        last_in   = batch_x[:, -1:, f_dim:].to(self.device)      # (B,1,C)
+        prev_flat = rearrange(last_in.expand_as(gt_seq), 'b t d -> b (t d)')
         
-        return outputs, gt_full
+        return outputs, true, prev_flat
 
 # new class for multi-dataset
 class SameCompanyBatchSampler(Sampler):
@@ -396,25 +538,3 @@ class SameCompanyBatchSampler(Sampler):
     def __len__(self):
         return sum(len(r) // self.batch_size for r in self.buckets)
 
-# new loss calculation
-def diff_transform(preds_flat, gts_flat, last_val, pred_len, out_dim):
-    """
-    把 [B, T*out_dim] 攤平成 [B,T,out_dim]，接上 last_val，做一階差分，
-    再攤平回 [B,T*out_dim]。
-
-    preds_flat, gts_flat : [B, T*out_dim]
-    last_val             : [B, 1, out_dim]  --- 承接最後一個輸入值
-    """
-    # reshape
-    preds = preds_flat.view(-1, pred_len, out_dim)  # [B,T,C]
-    gts   = gts_flat.view_as(preds)                 # [B,T,C]
-
-    # 接上 last value → 做相鄰差分
-    p_seq = torch.cat([last_val, preds], dim=1)     # [B,T+1,C]
-    g_seq = torch.cat([last_val, gts  ], dim=1)
-
-    p_diff = p_seq[:,1:] - p_seq[:,:-1]             # Δhat
-    g_diff = g_seq[:,1:] - g_seq[:,:-1]             # Δtrue
-
-    # 攤平回 [B, T*C]
-    return p_diff.reshape(preds_flat.shape), g_diff.reshape(gts_flat.shape)

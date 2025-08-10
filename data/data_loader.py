@@ -219,7 +219,8 @@ class Dataset_ETT_minute(Dataset):
 class Dataset_Custom(Dataset):
     def __init__(self, root_path, flag='train', size=None, 
                  features='S', data_path='ETTh1.csv', 
-                 target='OT', scale=True, inverse=False, timeenc=0, freq='h', cols=None):
+                 target='OT', scale=True, inverse=False, timeenc=0, freq='h', cols=None,
+                 date_from=None, date_to=None):
         # size [seq_len, label_len, pred_len]
         # info
         if size == None:
@@ -244,12 +245,22 @@ class Dataset_Custom(Dataset):
         self.cols=cols
         self.root_path = root_path
         self.data_path = data_path
+        self.date_from = date_from
+        self.date_to = date_to
         self.__read_data__()
 
     def __read_data__(self):
         self.scaler = StandardScaler()
         df_raw = pd.read_csv(os.path.join(self.root_path,
                                           self.data_path))
+        
+        df_raw['date'] = pd.to_datetime(df_raw['date'])
+        date_from = getattr(self, 'date_from', None)   # 字串 or None
+        date_to   = getattr(self, 'date_to',   None)
+        if date_from:
+            df_raw = df_raw[df_raw['date'] >= pd.to_datetime(date_from)]
+        if date_to:
+            df_raw = df_raw[df_raw['date'] <= pd.to_datetime(date_to)]
         '''
         df_raw.columns: ['date', ...(other features), target feature]
         '''

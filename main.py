@@ -135,7 +135,26 @@ parser.add_argument('--pretrained', type=str, default=None, help=
 parser.add_argument('--loss_mode', type=str, default='direct', choices=['direct', 'diff'], help=
                     "direct: MSE; diff: change to Increase then MSE"
 )
-
+# new arguments for loss weight
+parser.add_argument('--diff_weight', type=float, default=1.0, help=
+                    "weight for loss, default 1.0; only use when loss_mode is 'diff' (change to Increase)"
+)
+parser.add_argument('--diff_threshold', type=float, default=0.10, help=
+                    "threshold for diff loss, default 0.10; only use when loss_mode is 'diff' (change to Increase)"
+)
+# new arguments for data range
+parser.add_argument('--date_from', type=str, default=None,
+                    help="start from (YYYY-MM-DD)")
+parser.add_argument('--date_to',   type=str, default=None,
+                    help="end from (YYYY-MM-DD)")
+#new arguments for limiting model output
+parser.add_argument('--pct_limit', type=float, default=0.0,
+                    help='|pred - prev| ≤ pct_limit x; limit use when > 0.0')
+parser.add_argument('--limit_col', type=int, default=-1,
+                    help='choose which column to limit; only use when pct_limit > 0.0')
+#new arguments for test sliding window
+parser.add_argument('--non_overlap_test',action='store_true',
+                    help='Test with non-overlapping windows (index += pred_len). Default OFF keeps original sliding=1.')
 
 args = parser.parse_args()
 

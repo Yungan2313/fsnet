@@ -4,7 +4,9 @@
 *.pyc
 **/__pycache__/
 data/*.csv
+data/2454_like/
 checkpoints/
 results1/
 results4/
 results3/
+results2/
