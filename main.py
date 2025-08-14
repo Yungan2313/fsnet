@@ -6,9 +6,39 @@ import numpy as np
 import uuid
 import datetime
 import importlib
+import re
 
 #from exp.exp_online import Exp_TS2VecSupervised
 
+def normalize_ticker_list(val):
+    """
+    支援：
+    - None            -> []
+    - ['2330','2357'] -> 同步清理空白
+    - ['2330,2357']   -> 逗號分割
+    - '2330,2357'     -> 逗號/中文逗號/空白分割
+    """
+    if val is None:
+        return []
+    if isinstance(val, list):
+        if len(val) == 1:
+            raw = val[0]
+        else:
+            # 允許混合：多個值 + 其中含逗號
+            raw = ' '.join(val)
+    else:
+        raw = str(val)
+
+    # 支援英文逗號、中文逗號與空白
+    parts = re.split(r'[,\uFF0C\s]+', raw.strip())
+    out = []
+    seen = set()
+    for p in parts:
+        p = p.strip()
+        if p and p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
 
 def init_dl_program(
         device_name,
@@ -155,7 +185,17 @@ parser.add_argument('--limit_col', type=int, default=-1,
 #new arguments for test sliding window
 parser.add_argument('--non_overlap_test',action='store_true',
                     help='Test with non-overlapping windows (index += pred_len). Default OFF keeps original sliding=1.')
-
+parser.add_argument('--test_stride', type=int, default=0,
+                    help='Custom test sliding window step. If >0, overrides non_overlap_test (step=pred_len).')
+#new arguments for aux oneline learning
+parser.add_argument('--aux_tickers', nargs='*', default=None,
+                    help='Extra tickers used only during online test updates. Not logged to preds/trues.')
+parser.add_argument('--aux_lr_scale', type=float, default=0.2,
+                    help='LR multiplier for auxiliary updates during online test (e.g., 0.2 = 20% of base LR).')
+parser.add_argument('--aux_inner', type=int, default=1,
+                    help='How many gradient steps to run per aux batch (per step).')
+parser.add_argument('--aux_update_order',choices=['before', 'after'],default='after',                  # 預設維持原本流程：先主資料，再 aux
+                    help='When using aux_tickers during online test, run aux updates before or after the main update.')
 args = parser.parse_args()
 
 args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
@@ -193,6 +233,8 @@ args.freq = args.freq[-1:]
 #new arguments for multi-dataset
 if args.tickers is not None:
     args.tickers = [s.strip() for s in args.tickers.split(',') if s.strip()]
+
+args.aux_tickers = normalize_ticker_list(args.aux_tickers)
 
 print('Args in experiment:')
 print(args)

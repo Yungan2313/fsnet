@@ -4,12 +4,12 @@
 i=1
 n=2
 bsz=1
-pred_len=5
+pred_len=10
 method="fsnet"
 
 # 自訂資料集
-data_name="2454"
-data_file="2454.csv"
+data_name="3045"
+data_file="3045.csv"
 root="./data/"
 
 #要修改input 維度記得修改 => enc_in
@@ -23,6 +23,10 @@ root="./data/"
 #--date_to 2018-12-31
 #--pct_limit 0.10 => 記得把inverse關掉
 #--limit_col -1(已經是default不需要特別去開)
+# --aux_tickers '2330,2357,2376,2379,3017,3034,4919,6531,8299'
+# --aux_lr_scale 0.2
+# --aux_inner 1
+# --aux_update_order 'before'  
 
 python -u main.py \
   --method $method \
@@ -45,6 +49,14 @@ python -u main.py \
   --online_learning full \
   --itr $i \
   --des 'Exp'\
-  --loss_mode diff \
-  --pct_limit 0.05 \
+  \
   --non_overlap_test \
+  --pct_limit 0.10 \
+  --test_stride 8 \
+  # --aux_tickers '2330,2357,2376,2379,3017,3034,4919,6531,8299' \
+  # --aux_lr_scale 0.2 \
+  # --aux_inner 1 \
+  # --aux_update_order 'before' \
+  # --pretrained './checkpoints/fsnet_2454_pl5_olfull_optadam_tb1_2025_08_10_22_02_7205/checkpoint.pth' \
+  # --date_from 2019-01-01 \
+  
